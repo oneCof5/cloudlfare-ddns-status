@@ -1,5 +1,7 @@
 FROM python:3.12-alpine
 
+LABEL org.opencontainers.image.source=https://github.com/oneCof5/cloudflare-ddns-status
+
 RUN apk add --no-cache bash jq tzdata
 
 WORKDIR /app
