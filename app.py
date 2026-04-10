@@ -5,17 +5,19 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from datetime import datetime, timezone
 
-SOURCE = os.environ.get("SOURCE_FILE", "/data/cf-ddns-updates.json")
+SOURCE = os.environ.get("SOURCE_FILE") or "/data/cf-ddns-updates.json"
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
 REFRESH = int(os.environ.get("REFRESH_SECONDS", "30"))
-HISTORY_LIMIT = int(os.environ.get("HISTORY_LIMIT", "25"))
 
 state = {
     "status": "starting",
     "lastScraped": None,
     "lastChanged": None,
     "currentIp": None,
+    "recordId": None,
+    "recordName": None,
+    "recordType": None,
     "historyCount": 0,
     "ipHistory": [],
     "sourceFile": SOURCE,
@@ -23,24 +25,26 @@ state = {
     "error": None,
 }
 
+previous_ip = None
+ip_history = []
+
 def now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-def pick(entry, *keys):
-    for key in keys:
-        if key in entry and entry[key] not in (None, ""):
-            return entry[key]
-    return None
-
 def load_source():
+    global previous_ip, ip_history
+
     if not os.path.exists(SOURCE):
         return {
             "status": "waiting",
             "lastScraped": None,
             "lastChanged": None,
             "currentIp": None,
-            "historyCount": 0,
-            "ipHistory": [],
+            "recordId": None,
+            "recordName": None,
+            "recordType": None,
+            "historyCount": len(ip_history),
+            "ipHistory": ip_history[-25:],
             "sourceFile": SOURCE,
             "lastReadAt": now_iso(),
             "error": "Source file not found yet"
@@ -55,59 +59,72 @@ def load_source():
             "lastScraped": None,
             "lastChanged": None,
             "currentIp": None,
-            "historyCount": 0,
-            "ipHistory": [],
+            "recordId": None,
+            "recordName": None,
+            "recordType": None,
+            "historyCount": len(ip_history),
+            "ipHistory": ip_history[-25:],
             "sourceFile": SOURCE,
             "lastReadAt": now_iso(),
             "error": f"Failed reading source JSON: {e}"
         }
 
-    entries = raw if isinstance(raw, list) else [raw]
-    cleaned = []
-
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        item = {
-            "timestamp": pick(e, "timestamp", "time", "date"),
-            "ip": pick(e, "ip", "ipv4", "address"),
-            "updated": pick(e, "updated", "changed"),
-            "host": pick(e, "host", "domain", "hostname", "record"),
-            "raw": e,
+    if not isinstance(raw, dict):
+        return {
+            "status": "error",
+            "lastScraped": None,
+            "lastChanged": None,
+            "currentIp": None,
+            "recordId": None,
+            "recordName": None,
+            "recordType": None,
+            "historyCount": len(ip_history),
+            "ipHistory": ip_history[-25:],
+            "sourceFile": SOURCE,
+            "lastReadAt": now_iso(),
+            "error": "Expected a single JSON object"
         }
-        cleaned.append(item)
 
-    current_ip = cleaned[-1]["ip"] if cleaned else None
-    last_scraped = cleaned[-1]["timestamp"] if cleaned else None
+    current_ip = raw.get("content")
+    scraped_at = now_iso()
+    changed_at = None
 
-    changed_entries = [x for x in cleaned if str(x["updated"]).lower() in ("true", "1", "yes")]
-    last_changed = changed_entries[-1]["timestamp"] if changed_entries else None
-
-    history = []
-    for item in reversed(cleaned[-HISTORY_LIMIT:]):
-        history.append({
-            "timestamp": item["timestamp"],
-            "ip": item["ip"],
-            "updated": item["updated"],
-            "host": item["host"],
+    if current_ip and current_ip != previous_ip:
+        changed_at = scraped_at
+        ip_history.append({
+            "timestamp": scraped_at,
+            "ip": current_ip
         })
+        previous_ip = current_ip
 
     return {
         "status": "ok",
-        "lastScraped": last_scraped,
-        "lastChanged": last_changed,
+        "lastScraped": scraped_at,
+        "lastChanged": changed_at,
         "currentIp": current_ip,
-        "historyCount": len(cleaned),
-        "ipHistory": history,
+        "recordId": raw.get("id"),
+        "recordName": raw.get("name"),
+        "recordType": raw.get("type"),
+        "historyCount": len(ip_history),
+        "ipHistory": list(reversed(ip_history[-25:])),
         "sourceFile": SOURCE,
-        "lastReadAt": now_iso(),
+        "lastReadAt": scraped_at,
         "error": None,
     }
 
 def updater():
     global state
+    last_changed_persist = None
+
     while True:
-        state = load_source()
+        new_state = load_source()
+
+        if new_state.get("lastChanged"):
+            last_changed_persist = new_state["lastChanged"]
+        elif last_changed_persist:
+            new_state["lastChanged"] = last_changed_persist
+
+        state = new_state
         time.sleep(REFRESH)
 
 class Handler(BaseHTTPRequestHandler):
